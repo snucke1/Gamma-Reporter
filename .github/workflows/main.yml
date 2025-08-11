@@ -3,9 +3,20 @@
 name: Daily Gamma Report
 
 on:
-  # Schedule to run every day at 12:00 UTC (adjust as needed)
+  # Schedule to run at multiple times
   schedule:
-    - cron: '0 12 * * *'
+    # --- For the 09:00 AM Sweden Time Report ---
+    # Runs at 07:00 UTC (09:00 CEST) during summer months (Apr-Oct)
+    - cron: '0 7 * 4-10 *'
+    # Runs at 08:00 UTC (09:00 CET) during winter months (Nov-Mar)
+    - cron: '0 8 * 1-3,11-12 *'
+
+    # --- For the 12:00 PM (Noon) Sweden Time Report ---
+    # Runs at 10:00 UTC (12:00 CEST) during summer months (Apr-Oct)
+    - cron: '0 10 * 4-10 *'
+    # Runs at 11:00 UTC (12:00 CET) during winter months (Nov-Mar)
+    - cron: '0 11 * 1-3,11-12 *'
+    
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
@@ -33,11 +44,3 @@ jobs:
         RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
         EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
       run: python gamma_reporter.py SPX
-      
-    # Optional: Add another step to run for another index like NDX
-    # - name: Run Gamma Reporter for NDX
-    #   env:
-    #     SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
-    #     RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
-    #     EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
-    #   run: python gamma_reporter.py NDX
