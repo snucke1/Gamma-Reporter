@@ -66,7 +66,7 @@ def process_gamma(df, spot_price):
     df['TotalGamma'] = (df['CallGEX'] + df['PutGEX']) / CONFIG['BILLION']
     return df
 
-# --- PLOTTING FUNCTION (No changes here) ---
+# --- PLOTTING FUNCTION (Updated alpha value) ---
 def plot_gamma(df, spot_price, from_strike, to_strike, index, title_prefix, ax1, ax2, bin_width=None, add_guidance_box=False):
     if bin_width is not None:
         df = df.copy(); df['StrikeBin'] = (df['StrikePrice'] // bin_width) * bin_width
@@ -101,7 +101,7 @@ def plot_gamma(df, spot_price, from_strike, to_strike, index, title_prefix, ax1,
         if gamma_ratio > CONFIG['GR_HIGH_THRESHOLD']: guidance_text = high_gr_text + always_on_text
         elif gamma_ratio < CONFIG['GR_LOW_THRESHOLD']: guidance_text = low_gr_text + always_on_text
         else: guidance_text = neutral_gr_text + always_on_text
-        ax1.text(0.02, 0.98, guidance_text, transform=ax1.transAxes, fontsize=9, fontweight='bold', bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.6), verticalalignment='top')
+        ax1.text(0.02, 0.98, guidance_text, transform=ax1.transAxes, fontsize=9, fontweight='bold', bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.4), verticalalignment='top')
     ax2.grid(True, alpha=0.3)
     ax2.bar(strikes, df_agg['CallGEX'].values / CONFIG['BILLION'], width=bar_width, linewidth=1.5 if bin_width else 0.5, edgecolor='k', color='green', alpha=0.7, label="Call Gamma")
     ax2.bar(strikes, df_agg['PutGEX'].values / CONFIG['BILLION'], width=bar_width, linewidth=1.5 if bin_width else 0.5, edgecolor='k', color='red', alpha=0.7, label="Put Gamma")
@@ -113,18 +113,16 @@ def plot_gamma(df, spot_price, from_strike, to_strike, index, title_prefix, ax1,
     ax2.text(0.02, 0.98, metrics_text, transform=ax2.transAxes, fontsize=10, fontweight='bold', bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.8), verticalalignment='top')
     ax2.legend()
 
-# --- NEW: Email Function ---
+# --- Email Function (No changes here) ---
 def send_email_with_chart(image_path, index, spot_price):
-    # Get credentials from environment variables
     sender_email = os.environ.get('SENDER_EMAIL')
     receiver_email = os.environ.get('RECEIVER_EMAIL')
-    email_password = os.environ.get('EMAIL_APP_PASSWORD') # Use an App Password
+    email_password = os.environ.get('EMAIL_APP_PASSWORD')
 
     if not all([sender_email, receiver_email, email_password]):
         logging.error("Email credentials not found in environment variables.")
         return
 
-    # Create the email
     msg = MIMEMultipart()
     today_str = date.today().strftime("%Y-%m-%d")
     msg['Subject'] = f"Gamma Exposure Report for {index} - {today_str}"
@@ -134,13 +132,11 @@ def send_email_with_chart(image_path, index, spot_price):
     body = f"Attached is the gamma exposure chart for {index}.\n\nCurrent Spot Price: ${spot_price:,.2f}"
     msg.attach(MIMEText(body, 'plain'))
 
-    # Attach the image
     with open(image_path, 'rb') as fp:
         img = MIMEImage(fp.read())
         img.add_header('Content-Disposition', 'attachment', filename=os.path.basename(image_path))
         msg.attach(img)
 
-    # Send the email via Gmail's SMTP server
     try:
         logging.info(f"Sending email to {receiver_email}...")
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
@@ -161,13 +157,24 @@ def main():
     data_df = pd.DataFrame(options["data"]["options"])
     data_df = parse_option_data(data_df)
 
-    # --- Data processing for 0DTE and 6M (No changes here) ---
+    # --- MODIFIED: 0DTE and 1DTE (0-1 DTE) ---
     today_date = date.today()
+    tomorrow_date = today_date + timedelta(days=1)  # Add tomorrow's date
+    
     half_range = CONFIG['STRIKE_RANGE_WIDTH'] / 2
     from_strike_0dte, to_strike_0dte = spot_price - half_range, spot_price + half_range
     otm_lower_bound = spot_price * (1 - CONFIG['OTM_FILTER_PERCENT'])
     otm_upper_bound = spot_price * (1 + CONFIG['OTM_FILTER_PERCENT'])
-    data_0dte = data_df[data_df['ExpirationDate'].dt.date == today_date]
+    
+    # Filter for both today AND tomorrow expiring options
+    data_0dte = data_df[(data_df['ExpirationDate'].dt.date == today_date) | 
+                        (data_df['ExpirationDate'].dt.date == tomorrow_date)]
+    
+    # Log the number of options found for each expiry
+    today_count = len(data_df[data_df['ExpirationDate'].dt.date == today_date])
+    tomorrow_count = len(data_df[data_df['ExpirationDate'].dt.date == tomorrow_date])
+    logging.info(f"Found {today_count} options expiring today and {tomorrow_count} options expiring tomorrow")
+    
     data_0dte = data_0dte[(data_0dte['Strike'] >= otm_lower_bound) & (data_0dte['Strike'] <= otm_upper_bound)]
     calls_0dte = data_0dte[data_0dte['CallPut'] == "C"].reset_index(drop=True)[['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
     puts_0dte = data_0dte[data_0dte['CallPut'] == "P"].reset_index(drop=True)[['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
@@ -175,36 +182,54 @@ def main():
     df_0dte.columns = ['ExpirationDate', 'StrikePrice', 'CallIV', 'CallGamma', 'CallOpenInt', 'PutIV', 'PutGamma', 'PutOpenInt']
     df_0dte['ExpirationDate'] += timedelta(hours=16)
     df_0dte = validate_and_clean_data(df_0dte)
-    if len(df_0dte) == 0: logging.warning("No valid 0-DTE data after cleaning")
+    if len(df_0dte) == 0: logging.warning("No valid 0-1DTE options data after cleaning")
     else: df_0dte = process_gamma(df_0dte, spot_price)
 
+    # --- MODIFIED: 6 Months (excluding today's options) ---
     six_months_later = today_date + relativedelta(months=CONFIG['MONTHS_TO_INCLUDE'])
     from_strike_6m, to_strike_6m = CONFIG['STRIKE_RANGE_LOWER'] * spot_price, CONFIG['STRIKE_RANGE_UPPER'] * spot_price
-    data_6m = data_df[data_df['ExpirationDate'].dt.date <= six_months_later]
+    
+    # Exclude today's expiring options, start from tomorrow
+    data_6m = data_df[(data_df['ExpirationDate'].dt.date > today_date) & 
+                      (data_df['ExpirationDate'].dt.date <= six_months_later)]
+    
+    # Log the date range for 6M options
+    if len(data_6m) > 0:
+        earliest_expiry = data_6m['ExpirationDate'].dt.date.min()
+        latest_expiry = data_6m['ExpirationDate'].dt.date.max()
+        logging.info(f"6M options date range: {earliest_expiry} to {latest_expiry} (excluding today)")
+    
     calls_6m = data_6m[data_6m['CallPut'] == "C"].reset_index(drop=True)[['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
     puts_6m = data_6m[data_6m['CallPut'] == "P"].reset_index(drop=True)[['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
     df_6m = calls_6m.merge(puts_6m, on=['ExpirationDate', 'Strike'], suffixes=('_call', '_put'))
     df_6m.columns = ['ExpirationDate', 'StrikePrice', 'CallIV', 'CallGamma', 'CallOpenInt', 'PutIV', 'PutGamma', 'PutOpenInt']
     df_6m['ExpirationDate'] += timedelta(hours=16)
     df_6m = validate_and_clean_data(df_6m)
-    if len(df_6m) == 0: logging.warning("No valid 6M data after cleaning")
+    if len(df_6m) == 0: logging.warning("No valid 6M options data after cleaning")
     else: df_6m = process_gamma(df_6m, spot_price)
 
-    # --- MODIFIED: Plotting ---
+    # --- MODIFIED: Plotting with updated titles ---
     fig, axs = plt.subplots(2, 2, figsize=(20, 14))
-    if len(df_0dte) > 0: plot_gamma(df_0dte, spot_price, from_strike_0dte, to_strike_0dte, index, "0-DTE", axs[0,0], axs[1,0])
-    else: axs[0,0].set_title("No valid 0-DTE data"); axs[1,0].set_title("No valid 0-DTE data")
-    if len(df_6m) > 0: plot_gamma(df_6m, spot_price, from_strike_6m, to_strike_6m, index, "6M", axs[0,1], axs[1,1], bin_width=20, add_guidance_box=True)
-    else: axs[0,1].set_title("No valid 6M data"); axs[1,1].set_title("No valid 6M data")
+    
+    # 0-1DTE: left column (no binning) - Updated title to reflect 0-1DTE
+    if len(df_0dte) > 0: 
+        plot_gamma(df_0dte, spot_price, from_strike_0dte, to_strike_0dte, index, "0-1DTE", axs[0,0], axs[1,0])
+    else: 
+        axs[0,0].set_title("No valid 0-1DTE data"); axs[1,0].set_title("No valid 0-1DTE data")
+    
+    # 6M (excluding today): right column with updated title
+    if len(df_6m) > 0: 
+        plot_gamma(df_6m, spot_price, from_strike_6m, to_strike_6m, index, "6M (excl. today)", axs[0,1], axs[1,1], bin_width=20, add_guidance_box=True)
+    else: 
+        axs[0,1].set_title("No valid 6M data"); axs[1,1].set_title("No valid 6M data")
 
     plt.tight_layout()
     chart_filename = f"gamma_report_{index}_{date.today()}.png"
-    plt.savefig(chart_filename) # Save the plot instead of showing it
+    plt.savefig(chart_filename)
     logging.info(f"Chart saved as {chart_filename}")
     
     # Send the email
     send_email_with_chart(chart_filename, index, spot_price)
-
 
 if __name__ == "__main__":
     main()
