@@ -19,7 +19,7 @@ from email.mime.image import MIMEImage
 warnings.filterwarnings('ignore')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- CONFIGURATION (No changes) ---
+# --- CONFIGURATION ---
 CONFIG = {
     'STRIKE_RANGE_WIDTH': 500, 'OTM_FILTER_PERCENT': 0.01,
     'STRIKE_RANGE_LOWER': 0.8, 'STRIKE_RANGE_UPPER': 1.2,
@@ -30,14 +30,16 @@ CONFIG = {
 }
 pd.options.display.float_format = '{:,.4f}'.format
 
-# --- DATA PROCESSING & CALCULATION FUNCTIONS (No changes) ---
+# --- DATA PROCESSING & CALCULATION FUNCTIONS ---
 def calcGammaEx(S, K, vol, T, r, q, OI):
-    if T <= 0 or vol <= 0 or S <= 0 or K <= 0: return 0
+    if T <= 0 or vol <= 0 or S <= 0 or K <= 0:
+        return 0
     try:
         dp = (np.log(S / K) + (r - q + 0.5 * vol**2) * T) / (vol * np.sqrt(T))
         gamma = np.exp(-q * T) * norm.pdf(dp) / (S * vol * np.sqrt(T))
         return OI * CONFIG['CONTRACT_SIZE'] * S * S * CONFIG['PERCENT_MOVE'] * gamma
-    except (ValueError, ZeroDivisionError): return 0
+    except (ValueError, ZeroDivisionError):
+        return 0
 
 def calculate_gamma_profile(df, from_strike, to_strike):
     levels = np.linspace(from_strike, to_strike, 100)
@@ -60,33 +62,43 @@ def find_gamma_flip_points(levels, total_gamma):
     for idx in zero_crossings:
         if idx < len(levels) - 1:
             x1, x2, y1, y2 = levels[idx], levels[idx + 1], total_gamma[idx], total_gamma[idx + 1]
-            if y2 != y1: flip_points.append(x1 - y1 * (x2 - x1) / (y2 - y1))
+            if y2 != y1:
+                flip_points.append(x1 - y1 * (x2 - x1) / (y2 - y1))
     return flip_points
 
 def parse_option_data(data_df):
     data_df['CallPut'] = data_df['option'].str.slice(start=-9, stop=-8)
-    data_df['ExpirationDate'] = pd.to_datetime(data_df['option'].str.slice(start=-15, stop=-9), format='%y%m%d', errors='coerce').dropna()
-    data_df['Strike'] = pd.to_numeric(data_df['option'].str.slice(start=-8, stop=-3), errors='coerce').dropna()
-    return data_df.dropna(subset=['ExpirationDate', 'Strike'])
+    data_df['ExpirationDate'] = data_df['option'].str.slice(start=-15, stop=-9)
+    data_df['ExpirationDate'] = pd.to_datetime(data_df['ExpirationDate'], format='%y%m%d', errors='coerce')
+    data_df = data_df[data_df['ExpirationDate'].notna()]
+    data_df['Strike'] = data_df['option'].str.slice(start=-8, stop=-3)
+    data_df['Strike'] = pd.to_numeric(data_df['Strike'].str.lstrip('0'), errors='coerce')
+    data_df = data_df[data_df['Strike'].notna()]
+    return data_df
 
 def validate_and_clean_data(df):
     numeric_columns = ['CallIV', 'PutIV', 'CallGamma', 'PutGamma', 'CallOpenInt', 'PutOpenInt', 'StrikePrice']
-    for col in numeric_columns: df[col] = pd.to_numeric(df[col], errors='coerce')
-    df = df.dropna(subset=numeric_columns)
-    df = df[(df['StrikePrice'] > 0) & (df['CallIV'] > 0) & (df['PutIV'] > 0) & (df['CallIV'] < 5) & (df['PutIV'] < 5)]
+    for col in numeric_columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df[df['StrikePrice'] > 0]
+    df = df[(df['CallIV'] > 0) & (df['PutIV'] > 0)]
     df = df[(df['CallOpenInt'] >= 0) & (df['PutOpenInt'] >= 0)]
+    df = df[(df['CallIV'] < 5) & (df['PutIV'] < 5)]
     return df
 
 def fetch_options_data(index):
     try:
         url = f"https://cdn.cboe.com/api/global/delayed_quotes/options/_{index}.json"
         logging.info(f"Fetching data from: {url}")
-        response = requests.get(url, timeout=30); response.raise_for_status()
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
         options = response.json()
-        if 'data' not in options or 'options' not in options['data']: raise ValueError("Unexpected data format")
+        if 'data' not in options or 'options' not in options['data']:
+            raise ValueError("Unexpected data format")
         return options
     except Exception as e:
-        logging.error(f"Error fetching data: {e}"); sys.exit(1)
+        logging.error(f"Error fetching data: {e}")
+        sys.exit(1)
 
 def process_gamma_for_bars(df, spot_price):
     df['CallGEX'] = df['CallGamma'] * df['CallOpenInt'] * CONFIG['CONTRACT_SIZE'] * spot_price * spot_price * CONFIG['PERCENT_MOVE'] * 0.5
@@ -94,7 +106,7 @@ def process_gamma_for_bars(df, spot_price):
     df['TotalGamma'] = (df['CallGEX'] + df['PutGEX']) / CONFIG['BILLION']
     return df
 
-# --- MODIFIED: PLOTTING FUNCTION for Bar Charts ---
+# --- PLOTTING FUNCTION for Bar Charts ---
 def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix, ax1, ax2, bin_width=None, add_guidance_box=False):
     if bin_width is not None:
         df = df.copy(); df['StrikeBin'] = (df['StrikePrice'] // bin_width) * bin_width
@@ -118,19 +130,20 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
     ax1.bar(strikes, df_agg['TotalGamma'].values, width=bar_width, linewidth=1.5 if bin_width else 0.5, edgecolor='k', color='steelblue', alpha=0.7, label="Net Gamma")
     ax1.set_xlim([from_strike, to_strike])
     ax1.set_title(f"{title_prefix} Total Gamma: ${df['TotalGamma'].sum():.2f} Bn per 1% {index} Move", fontweight="bold", fontsize=14)
-    ax1.set_xlabel('Strike Price', fontweight="bold"); ax1.set_ylabel('Spot Gamma Exposure ($B/1% move)', fontweight="bold")
+    ax1.set_xlabel('Strike Price', fontweight="bold")
+    ax1.set_ylabel('Spot Gamma Exposure ($B/1% move)', fontweight="bold")
     ax1.axvline(x=spot_price, color='red', lw=2, linestyle='--', label=f"{index} Spot: ${spot_price:,.0f}")
     ax1.legend()
-    # --- MODIFIED: Set X-axis ticks to a step of 50 ---
     start_tick = int(np.floor(from_strike / 50)) * 50
     end_tick = int(np.ceil(to_strike / 50)) * 50 + 50
     ax1.set_xticks(np.arange(start_tick, end_tick, 50))
     ax1.tick_params(axis='x', rotation=45, labelsize=8)
 
+    # RESTORED: Full, verbose guidance box text
     if add_guidance_box and not np.isnan(gamma_ratio):
-        high_gr_text = (f"GR > {CONFIG['GR_HIGH_THRESHOLD']} (Currently: {gamma_ratio:.2f}) - High Positive Gamma\nExpect: Tight ranges, dip-buying, upward drift.")
-        low_gr_text = (f"GR < {CONFIG['GR_LOW_THRESHOLD']} (Currently: {gamma_ratio:.2f}) - Low/Negative Gamma\nExpect: Widening ranges, rally-selling, downside bias.")
-        neutral_gr_text = (f"{CONFIG['GR_LOW_THRESHOLD']} ≤ GR ≤ {CONFIG['GR_HIGH_THRESHOLD']} (Currently: {gamma_ratio:.2f}) - Balanced Gamma\nExpect: Choppy or range-bound market.")
+        high_gr_text = (f"GR > {CONFIG['GR_HIGH_THRESHOLD']} (Currently: {gamma_ratio:.2f}) - High Positive Gamma\n-----------------------------------------------------------\nExpect: Tight ranges, dip-buying, upward drift\n(especially inside 2 weeks to OPEX).\n\nTrade Ideas:\n • If mkt opens down & momentum turns up:\n   Buy ATM/SOTM calls/call spreads or sell ATM put spreads.\n • If mkt opens higher: Tougher trade, low R/R.\n   Could sell OTM puts/spreads.\n")
+        low_gr_text = (f"GR < {CONFIG['GR_LOW_THRESHOLD']} (Currently: {gamma_ratio:.2f}) - Low/Negative Gamma\n-----------------------------------------------------------\nExpect: Widening ranges, rally-selling, downside bias.\n\nTrade Ideas:\n • If mkt opens high & momentum turns down:\n   Sell calls/spreads or buy puts/spreads.\n • If mkt opens down & momentum turns up:\n   Consider opposite trades.\n")
+        neutral_gr_text = (f"{CONFIG['GR_LOW_THRESHOLD']} ≤ GR ≤ {CONFIG['GR_HIGH_THRESHOLD']} (Currently: {gamma_ratio:.2f}) - Balanced Gamma\n-----------------------------------------------------------\nExpect: Choppy or range-bound market. No strong directional\npressure from dealer hedging.\n")
         if gamma_ratio > CONFIG['GR_HIGH_THRESHOLD']: guidance_text = high_gr_text
         elif gamma_ratio < CONFIG['GR_LOW_THRESHOLD']: guidance_text = low_gr_text
         else: guidance_text = neutral_gr_text
@@ -143,18 +156,21 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
     ax2.set_xlim([from_strike, to_strike])
     ax2.set_title(f"{title_prefix} Gamma Exposure by Option Type", fontweight="bold", fontsize=14)
     ax2.legend()
-    # --- MODIFIED: Set X-axis ticks to a step of 50 ---
     ax2.set_xticks(np.arange(start_tick, end_tick, 50))
     ax2.tick_params(axis='x', rotation=45, labelsize=8)
 
-# --- Email Function (No changes) ---
+# --- Email Function ---
 def send_email_with_charts(image_paths, index, spot_price):
-    sender_email, receiver_email, email_password = os.environ.get('SENDER_EMAIL'), os.environ.get('RECEIVER_EMAIL'), os.environ.get('EMAIL_APP_PASSWORD')
+    sender_email = os.environ.get('SENDER_EMAIL')
+    receiver_email = os.environ.get('RECEIVER_EMAIL')
+    email_password = os.environ.get('EMAIL_APP_PASSWORD')
     if not all([sender_email, receiver_email, email_password]):
-        logging.error("Email credentials not found in environment variables."); return
+        logging.error("Email credentials not found in environment variables.")
+        return
     msg = MIMEMultipart()
     msg['Subject'] = f"Gamma Report for {index} - {date.today().strftime('%Y-%m-%d')}"
-    msg['From'], msg['To'] = sender_email, receiver_email
+    msg['From'] = sender_email
+    msg['To'] = receiver_email
     msg.attach(MIMEText(f"Attached are the gamma charts for {index}.\n\nCurrent Spot Price: ${spot_price:,.2f}", 'plain'))
     for image_path in image_paths:
         with open(image_path, 'rb') as fp:
@@ -164,13 +180,17 @@ def send_email_with_charts(image_paths, index, spot_price):
     try:
         logging.info(f"Sending email with {len(image_paths)} charts to {receiver_email}...")
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            server.login(sender_email, email_password); server.send_message(msg)
+            server.login(sender_email, email_password)
+            server.send_message(msg)
         logging.info("Email sent successfully!")
-    except Exception as e: logging.error(f"Failed to send email: {e}")
+    except Exception as e:
+        logging.error(f"Failed to send email: {e}")
 
 # --- MAIN EXECUTION BLOCK ---
 def main():
-    if len(sys.argv) != 2: print("Usage: python gamma_reporter_combined.py <INDEX>"); sys.exit(1)
+    if len(sys.argv) != 2:
+        print("Usage: python gamma_reporter_combined.py <INDEX>")
+        sys.exit(1)
     index = sys.argv[1].upper()
     options = fetch_options_data(index)
     spot_price = float(options["data"]["close"])
@@ -179,9 +199,21 @@ def main():
 
     # --- Data Prep for 0-1 DTE ---
     today_date = date.today()
-    data_0dte_raw = data_df[data_df['ExpirationDate'].dt.date.isin([today_date, today_date + timedelta(days=1)])]
-    calls_0dte = data_0dte_raw[data_0dte_raw['CallPut'] == "C"][['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
-    puts_0dte = data_0dte_raw[data_0dte_raw['CallPut'] == "P"][['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
+    tomorrow_date = today_date + timedelta(days=1)
+    
+    # Define strike range for 0-1 DTE options
+    otm_lower_bound = spot_price * (1 - CONFIG['OTM_FILTER_PERCENT'])
+    otm_upper_bound = spot_price * (1 + CONFIG['OTM_FILTER_PERCENT'])
+    
+    # Filter for options expiring today AND tomorrow
+    data_0dte = data_df[(data_df['ExpirationDate'].dt.date == today_date) | 
+                        (data_df['ExpirationDate'].dt.date == tomorrow_date)]
+    
+    # *** CRITICAL FIX: Restore the filtering for 0-1 DTE strikes ***
+    data_0dte = data_0dte[(data_0dte['Strike'] >= otm_lower_bound) & (data_0dte['Strike'] <= otm_upper_bound)]
+    
+    calls_0dte = data_0dte[data_0dte['CallPut'] == "C"].reset_index(drop=True)[['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
+    puts_0dte = data_0dte[data_0dte['CallPut'] == "P"].reset_index(drop=True)[['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
     df_0dte = calls_0dte.merge(puts_0dte, on=['ExpirationDate', 'Strike'], suffixes=('_call', '_put'))
     df_0dte.columns = ['ExpirationDate', 'StrikePrice', 'CallIV', 'CallGamma', 'CallOpenInt', 'PutIV', 'PutGamma', 'PutOpenInt']
     df_0dte['ExpirationDate'] += timedelta(hours=16)
@@ -189,9 +221,10 @@ def main():
 
     # --- Data Prep for 6 Months ---
     six_months_later = today_date + relativedelta(months=CONFIG['MONTHS_TO_INCLUDE'])
-    data_6m_raw = data_df[(data_df['ExpirationDate'].dt.date > today_date) & (data_df['ExpirationDate'].dt.date <= six_months_later)]
-    calls_6m = data_6m_raw[data_6m_raw['CallPut'] == "C"][['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
-    puts_6m = data_6m_raw[data_6m_raw['CallPut'] == "P"][['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
+    data_6m = data_df[(data_df['ExpirationDate'].dt.date > today_date) & 
+                      (data_df['ExpirationDate'].dt.date <= six_months_later)]
+    calls_6m = data_6m[data_6m['CallPut'] == "C"].reset_index(drop=True)[['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
+    puts_6m = data_6m[data_6m['CallPut'] == "P"].reset_index(drop=True)[['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
     df_6m = calls_6m.merge(puts_6m, on=['ExpirationDate', 'Strike'], suffixes=('_call', '_put'))
     df_6m.columns = ['ExpirationDate', 'StrikePrice', 'CallIV', 'CallGamma', 'CallOpenInt', 'PutIV', 'PutGamma', 'PutOpenInt']
     df_6m['ExpirationDate'] += timedelta(hours=16)
@@ -202,15 +235,20 @@ def main():
     fig_bars, axs = plt.subplots(2, 2, figsize=(20, 14))
     if not df_0dte.empty:
         df_0dte_processed = process_gamma_for_bars(df_0dte.copy(), spot_price)
-        plot_gamma_bars(df_0dte_processed, spot_price, spot_price * (1 - CONFIG['OTM_FILTER_PERCENT']), spot_price * (1 + CONFIG['OTM_FILTER_PERCENT']), index, "0-1DTE", axs[0,0], axs[1,0])
-    else: axs[0,0].set_title("No valid 0-1DTE data"); axs[1,0].set_title("No valid 0-1DTE data")
+        plot_gamma_bars(df_0dte_processed, spot_price, otm_lower_bound, otm_upper_bound, index, "0-1DTE", axs[0,0], axs[1,0])
+    else:
+        axs[0,0].set_title("No valid 0-1DTE data"); axs[1,0].set_title("No valid 0-1DTE data")
     if not df_6m.empty:
         df_6m_processed = process_gamma_for_bars(df_6m.copy(), spot_price)
-        plot_gamma_bars(df_6m_processed, spot_price, CONFIG['STRIKE_RANGE_LOWER'] * spot_price, CONFIG['STRIKE_RANGE_UPPER'] * spot_price, index, "6M (excl. today)", axs[0,1], axs[1,1], bin_width=20, add_guidance_box=True)
-    else: axs[0,1].set_title("No valid 6M data"); axs[1,1].set_title("No valid 6M data")
+        from_strike_6m, to_strike_6m = CONFIG['STRIKE_RANGE_LOWER'] * spot_price, CONFIG['STRIKE_RANGE_UPPER'] * spot_price
+        plot_gamma_bars(df_6m_processed, spot_price, from_strike_6m, to_strike_6m, index, "6M (excl. today)", axs[0,1], axs[1,1], bin_width=20, add_guidance_box=True)
+    else:
+        axs[0,1].set_title("No valid 6M data"); axs[1,1].set_title("No valid 6M data")
+    
     plt.tight_layout()
     bar_chart_filename = f"gamma_bars_{index}_{date.today()}.png"
-    plt.savefig(bar_chart_filename); plt.close(fig_bars)
+    plt.savefig(bar_chart_filename)
+    plt.close(fig_bars)
     logging.info(f"Bar chart saved as {bar_chart_filename}")
 
     # --- PLOT 2: Gamma Profile Line Chart ---
@@ -225,7 +263,8 @@ def main():
         ax_profile.grid(True, alpha=0.3)
         ax_profile.plot(levels, total_gamma, 'b-', linewidth=2, label="Total Gamma (0 & 1 DTE)")
         ax_profile.set_title(f"Gamma Profile (0-DTE & 1-DTE) - {index} - {today_date.strftime('%d %b %Y')}", fontweight="bold", fontsize=16)
-        ax_profile.set_xlabel('Index Price', fontweight="bold"); ax_profile.set_ylabel('Gamma Exposure ($ billions / 1% move)', fontweight="bold")
+        ax_profile.set_xlabel('Index Price', fontweight="bold")
+        ax_profile.set_ylabel('Gamma Exposure ($ billions / 1% move)', fontweight="bold")
         ax_profile.axhline(y=0, color='black', lw=1)
         ax_profile.axvline(x=spot_price, color='red', lw=2, linestyle='--', label=f"{index} Spot: ${spot_price:,.0f}")
         for i, flip in enumerate(flip_points):
@@ -236,23 +275,25 @@ def main():
         ax_profile.set_xlim([from_strike, to_strike])
         ax_profile.legend(loc='best')
         
-        # --- MODIFIED: Set X-axis ticks to a step of 50 ---
         start_tick = int(np.floor(from_strike / 50)) * 50
         end_tick = int(np.ceil(to_strike / 50)) * 50 + 50
         ax_profile.set_xticks(np.arange(start_tick, end_tick, 50))
         ax_profile.tick_params(axis='x', rotation=45, labelsize=9)
         
         plt.tight_layout()
-        plt.savefig(profile_chart_filename); plt.close(fig_profile)
+        plt.savefig(profile_chart_filename)
+        plt.close(fig_profile)
         logging.info(f"Profile chart saved as {profile_chart_filename}")
     else:
         logging.warning("Skipping profile chart generation due to no 0-1DTE data.")
         profile_chart_filename = None
 
     # --- Send Email ---
-    chart_files_to_send = [f for f in [bar_chart_filename, profile_chart_filename] if f]
-    if chart_files_to_send: send_email_with_charts(chart_files_to_send, index, spot_price)
-    else: logging.error("No charts were generated to email.")
+    chart_files_to_send = [f for f in [bar_chart_filename, profile_chart_filename] if f is not None]
+    if chart_files_to_send:
+        send_email_with_charts(chart_files_to_send, index, spot_price)
+    else:
+        logging.error("No charts were generated to email.")
 
 if __name__ == "__main__":
     main()
