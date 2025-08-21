@@ -7,9 +7,9 @@ on:
   schedule:
     # --- For the 09:00 AM Sweden Time Report ---
     # Runs at 07:00 UTC (09:00 CEST) during summer months (Apr-Oct)
-    - cron: '0 8 * 4-10 *'
+    - cron: '0 7 * 4-10 *'
     # Runs at 08:00 UTC (09:00 CET) during winter months (Nov-Mar)
-    - cron: '0 9 * 1-3,11-12 *'
+    - cron: '0 8 * 1-3,11-12 *'
 
     # --- For the 12:00 PM (Noon) Sweden Time Report ---
     # Runs at 10:00 UTC (12:00 CEST) during summer months (Apr-Oct)
@@ -43,6 +43,4 @@ jobs:
         SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
         RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
         EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
-      # --- THIS IS THE ONLY LINE THAT CHANGES ---
-      # We now run the new, combined script.
-      run: python gamma_reporter_combined.py SPX
+      run: python gamma_reporter.py SPX
