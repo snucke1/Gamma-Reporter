@@ -6,10 +6,10 @@ on:
   # Schedule to run at multiple times
   schedule:
     # --- For the 09:00 AM Sweden Time Report ---
-    # Runs at 07:00 UTC (08:00 CEST) during summer months (Apr-Oct)
-    - cron: '0 6 * 4-10 *'
-    # Runs at 08:00 UTC (08:00 CET) during winter months (Nov-Mar)
-    - cron: '0 7 * 1-3,11-12 *'
+    # Runs at 07:00 UTC (09:00 CEST) during summer months (Apr-Oct)
+    - cron: '0 7 * 4-10 *'
+    # Runs at 08:00 UTC (09:00 CET) during winter months (Nov-Mar)
+    - cron: '0 8 * 1-3,11-12 *'
 
     # --- For the 12:00 PM (Noon) Sweden Time Report ---
     # Runs at 10:00 UTC (12:00 CEST) during summer months (Apr-Oct)
