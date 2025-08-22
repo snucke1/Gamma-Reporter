@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Configuration constants
 CONFIG = {
     'STRIKE_RANGE_WIDTH': 500,  # For 0DTE
-    'OTM_FILTER_PERCENT': 0.01,  # For 0DTE
+    'OTM_FILTER_PERCENT': 0.02,  # For 0DTE
     'STRIKE_RANGE_LOWER': 0.8,   # For 6M and profile
     'STRIKE_RANGE_UPPER': 1.2,   # For 6M and profile
     'CONTRACT_SIZE': 100,
