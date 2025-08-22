@@ -112,7 +112,7 @@ def fetch_options_data(index):
 
 def calculate_gamma_profile(df, from_strike, to_strike):
     """Calculate gamma exposure profile across different spot levels"""
-    levels = np.linspace(from_strike, to_strike, 100)
+    levels = np.linspace(from_strike, to_strike, 50)
     
     today_date = date.today()
     df['daysTillExp'] = df['ExpirationDate'].apply(
