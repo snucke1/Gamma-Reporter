@@ -166,7 +166,7 @@ def process_gamma(df, spot_price):
     df['TotalGamma'] = (df['CallGEX'] + df['PutGEX']) / CONFIG['BILLION']
     return df
 
-def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix, ax1, ax2, bin_width=None, add_guidance_box=False):
+def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix, ax1, ax2, bin_width=None, add_guidance_box=False, show_50_ticks=False):
     """Plot gamma exposure as bar charts"""
     # Binning for 6M plot
     if bin_width is not None:
@@ -203,9 +203,11 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
             edgecolor='k', color='steelblue', alpha=0.7, label="Net Gamma")
     ax1.set_xlim([from_strike, to_strike])
     
-    # Set x-axis ticks every 50 points
-    tick_interval = 50
-    ax1.set_xticks(np.arange(from_strike, to_strike + tick_interval, tick_interval))
+    # Set x-axis ticks every 50 points for 0-1DTE only
+    if show_50_ticks:
+        tick_start = int((from_strike // 50) * 50)
+        tick_end = int(((to_strike // 50) + 1) * 50)
+        ax1.set_xticks(np.arange(tick_start, tick_end, 50))
     
     ax1.set_title(f"{title_prefix} Total Gamma: ${df['TotalGamma'].sum():.2f} Bn per 1% {index} Move",
                   fontweight="bold", fontsize=14)
@@ -273,10 +275,6 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
             width=bar_width, linewidth=1.5 if bin_width else 0.5, edgecolor='k',
             color='red', alpha=0.7, label="Put Gamma")
     ax2.set_xlim([from_strike, to_strike])
-    
-    # Set x-axis ticks every 50 points
-    ax2.set_xticks(np.arange(from_strike, to_strike + tick_interval, tick_interval))
-    
     ax2.set_title(f"{title_prefix} Gamma Exposure by Option Type", fontweight="bold", fontsize=14)
     ax2.set_xlabel('Strike Price', fontweight="bold")
     ax2.set_ylabel('Spot Gamma Exposure ($B/1% move)', fontweight="bold")
@@ -466,18 +464,18 @@ def main():
     fig1, axs = plt.subplots(2, 2, figsize=(20, 14))
     fig1.suptitle(f'Gamma Exposure Analysis - {index}', fontsize=16, fontweight='bold')
     
-    # Plot 0-1DTE (left column)
+    # Plot 0-1DTE (left column) - WITH 50-tick intervals
     if len(df_0dte) > 0:
         plot_gamma_bars(df_0dte, spot_price, from_strike_0dte, to_strike_0dte, index, "0-1DTE", 
-                       axs[0,0], axs[1,0], bin_width=None)
+                       axs[0,0], axs[1,0], bin_width=None, show_50_ticks=True)
     else:
         axs[0,0].set_title("No valid 0-1DTE data")
         axs[1,0].set_title("No valid 0-1DTE data")
     
-    # Plot 6M (right column)
+    # Plot 6M (right column) - WITHOUT 50-tick intervals (default behavior)
     if len(df_6m) > 0:
         plot_gamma_bars(df_6m, spot_price, from_strike_6m, to_strike_6m, index, "6M (excl. today)", 
-                       axs[0,1], axs[1,1], bin_width=20, add_guidance_box=True)
+                       axs[0,1], axs[1,1], bin_width=20, add_guidance_box=True, show_50_ticks=False)
     else:
         axs[0,1].set_title("No valid 6M data")
         axs[1,1].set_title("No valid 6M data")
