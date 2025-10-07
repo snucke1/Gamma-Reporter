@@ -202,6 +202,11 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
     ax1.bar(strikes, df_agg['TotalGamma'].values, width=bar_width, linewidth=1.5 if bin_width else 0.5,
             edgecolor='k', color='steelblue', alpha=0.7, label="Net Gamma")
     ax1.set_xlim([from_strike, to_strike])
+    
+    # Set x-axis ticks every 50 points
+    tick_interval = 50
+    ax1.set_xticks(np.arange(from_strike, to_strike + tick_interval, tick_interval))
+    
     ax1.set_title(f"{title_prefix} Total Gamma: ${df['TotalGamma'].sum():.2f} Bn per 1% {index} Move",
                   fontweight="bold", fontsize=14)
     ax1.set_xlabel('Strike Price', fontweight="bold")
@@ -268,6 +273,10 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
             width=bar_width, linewidth=1.5 if bin_width else 0.5, edgecolor='k',
             color='red', alpha=0.7, label="Put Gamma")
     ax2.set_xlim([from_strike, to_strike])
+    
+    # Set x-axis ticks every 50 points
+    ax2.set_xticks(np.arange(from_strike, to_strike + tick_interval, tick_interval))
+    
     ax2.set_title(f"{title_prefix} Gamma Exposure by Option Type", fontweight="bold", fontsize=14)
     ax2.set_xlabel('Strike Price', fontweight="bold")
     ax2.set_ylabel('Spot Gamma Exposure ($B/1% move)', fontweight="bold")
