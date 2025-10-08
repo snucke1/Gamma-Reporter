@@ -1,18 +1,18 @@
 name: Collect SPX Gamma Exposure (30-min)
 
 on:
-  # UTC schedule. We also guard with a market-open check in the job.
+  # UTC schedule. Guarded by a market-open check in the job.
   schedule:
     - cron: '30 13 * * 1-5'      # 13:30 UTC ~ US cash open (EDT)
     - cron: '0,30 14-20 * * 1-5' # 14:00–20:30 UTC
-    - cron: '0,30 21 * * 1-5'    # 21:00 UTC (handles EST overlap)
-  workflow_dispatch:             # allow manual runs
+    - cron: '0,30 21 * * 1-5'    # 21:00 UTC (covers EST overlap)
+  workflow_dispatch:
 
 permissions:
-  contents: write                # allow this workflow to commit data to the repo
+  contents: write   # allow this workflow to commit data to the repo
 
 env:
-  INDEX: SPX                     # change if you want a different underlying
+  INDEX: SPX
 
 jobs:
   collect:
@@ -44,7 +44,7 @@ jobs:
 
           now = datetime.datetime.now(datetime.timezone.utc)
           cal = mcal.get_calendar('XNYS')  # NYSE
-          # Use a small window so weekends/holidays don't error out:
+          # Small window so weekends/holidays don't error out:
           start = (now - datetime.timedelta(days=1)).date()
           end   = (now + datetime.timedelta(days=1)).date()
           sched = cal.schedule(start_date=start, end_date=end)
@@ -66,42 +66,72 @@ jobs:
         env:
           INDEX: ${{ env.INDEX }}
         run: |
-          # Create destination folder once
           mkdir -p data/intraday
 
-          # Run Python inline: import your collector and write directly to Parquet & CSV
           python - << 'PY'
           import os, sys, pathlib
           import pandas as pd
           import pyarrow as pa
           import pyarrow.parquet as pq
 
-          # Ensure we can import scripts/collector.py without __init__.py
+          # Import your collector
           sys.path.append('scripts')
-          import collector  # your scripts/collector.py
+          import collector
 
           index = os.getenv('INDEX', 'SPX')
           snap = collector.make_snapshot(index)  # dict with one row
 
-          # Build a 1-row DataFrame in a stable column order for Excel
+          # ---- 1) Normalize missing numeric fields to float NaN ----
+          for k in ["net_gex","gamma_ratio","zero_gamma","near_density"]:
+              if snap.get(k, None) is None:
+                  snap[k] = float('nan')
+
+          # ---- 2) Make a 1-row DataFrame with fixed column order & dtypes ----
           cols = ["timestamp_utc","index","spot","net_gex","gamma_ratio","zero_gamma","near_density"]
-          df = pd.DataFrame([[snap.get(c) for c in cols]], columns=cols)
+          df = pd.DataFrame([[snap.get(c) for c in cols]], columns=cols).astype({
+              "timestamp_utc": "string",
+              "index": "string",
+              "spot": "float64",
+              "net_gex": "float64",
+              "gamma_ratio": "float64",
+              "zero_gamma": "float64",
+              "near_density": "float64",
+          })
 
-          # ----- Append to Parquet -----
+          # Explicit Arrow schema keeps Parquet consistent
+          schema = pa.schema([
+              pa.field("timestamp_utc", pa.string()),
+              pa.field("index",         pa.string()),
+              pa.field("spot",          pa.float64()),
+              pa.field("net_gex",       pa.float64()),
+              pa.field("gamma_ratio",   pa.float64()),
+              pa.field("zero_gamma",    pa.float64()),
+              pa.field("near_density",  pa.float64()),
+          ])
+          new_tbl = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
+
           p_out = pathlib.Path("data") / "intraday" / "gex_intraday.parquet"
-          if p_out.exists():
-              old = pq.read_table(p_out)
-              new = pa.Table.from_pandas(df)
-              pq.write_table(pa.concat_tables([old, new]), p_out)
-          else:
-              pq.write_table(pa.Table.from_pandas(df), p_out)
+          p_out.parent.mkdir(parents=True, exist_ok=True)
 
-          # ----- Append to CSV (Excel-friendly) -----
+          if p_out.exists():
+              old_tbl = pq.read_table(p_out)
+              try:
+                  # Preferred: cast new row to the existing file's schema
+                  new_cast = new_tbl.cast(old_tbl.schema)
+                  combined = pa.concat_tables([old_tbl, new_cast])
+              except pa.lib.ArrowInvalid:
+                  # If the old file has odd types, cast the old file to our schema, then append
+                  old_cast = old_tbl.cast(schema)
+                  combined = pa.concat_tables([old_cast, new_tbl])
+              pq.write_table(combined, p_out)
+          else:
+              pq.write_table(new_tbl, p_out)
+
+          # ----- CSV (Excel-friendly) with duplicate protection -----
           c_out = pathlib.Path("data") / "intraday" / "gex_intraday.csv"
           if c_out.exists():
               old = pd.read_csv(c_out)
               cat = pd.concat([old, df], ignore_index=True)
-              # avoid duplicate rows if a retry happens
               cat = cat.drop_duplicates(subset=["timestamp_utc"], keep="last")
               cat.to_csv(c_out, index=False)
           else:
