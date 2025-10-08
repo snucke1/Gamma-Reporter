@@ -1,15 +1,18 @@
 name: Collect SPX Gamma Exposure (30-min)
 
 on:
-  # Cash session windows in UTC. We'll also check "is NYSE open?" inside the job.
+  # UTC schedule. We also guard with a market-open check in the job.
   schedule:
-    - cron: '30 13 * * 1-5'      # 13:30 UTC (EDT open)
-    - cron: '0,30 14-20 * * 1-5' # 14:00–20:30 UTC (EDT mid-session)
-    - cron: '0,30 21 * * 1-5'    # 21:00 UTC (EST overlap / handle DST)
-  workflow_dispatch:             # allows manual run from the Actions tab
+    - cron: '30 13 * * 1-5'      # 13:30 UTC ~ US cash open (EDT)
+    - cron: '0,30 14-20 * * 1-5' # 14:00–20:30 UTC
+    - cron: '0,30 21 * * 1-5'    # 21:00 UTC (handles EST overlap)
+  workflow_dispatch:             # manual run if needed
 
 permissions:
-  contents: write                # allow this job to commit data back to the repo
+  contents: write                # allow commits from this workflow
+
+env:
+  INDEX: SPX                     # change to e.g. SPX, SPY, QQQ if desired
 
 jobs:
   collect:
@@ -24,48 +27,59 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas pandas_market_calendars pyarrow
+          # gamma_reporter imports these at module import time:
+          pip install numpy pandas scipy matplotlib python-dateutil requests
+          # For calendar/Parquet and scheduling logic
+          pip install pandas_market_calendars pyarrow
 
-      - name: Skip if market closed (NYSE)
+      - name: Compute market-open (NYSE) safely
         id: nyse
         run: |
           python - << 'PY'
-          import sys, datetime, pandas_market_calendars as mcal
+          import os, datetime
+          import pandas_market_calendars as mcal
+
           now = datetime.datetime.now(datetime.timezone.utc)
-          nyse = mcal.get_calendar('XNYS')
-          sched = nyse.schedule(start_date=now.date(), end_date=now.date())
-          is_open = nyse.open_at_time(sched, now)
-          print(f"UTC now: {now.isoformat()}  |  NYSE open: {is_open}")
-          sys.exit(0 if is_open else 78)
+          cal = mcal.get_calendar('XNYS')  # NYSE
+          # Use a small window so weekends/holidays don't raise
+          start = (now - datetime.timedelta(days=1)).date()
+          end   = (now + datetime.timedelta(days=1)).date()
+          sched = cal.schedule(start_date=start, end_date=end)
+
+          is_open = False
+          if not sched.empty:
+            try:
+              is_open = cal.open_at_time(sched, now)
+            except Exception:
+              is_open = False
+
+          print(f"UTC now: {now.isoformat()} | NYSE open: {is_open}")
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+            fh.write(f"is_open={'true' if is_open else 'false'}\n")
           PY
 
       - name: Collect & save snapshot
-        if: steps.nyse.outcome == 'success'
+        if: steps.nyse.outputs.is_open == 'true'
+        env:
+          INDEX: ${{ env.INDEX }}
         run: |
           mkdir -p scripts data/intraday
-          python scripts/collector.py --out snapshot.json
+          # Run the collector using your gamma_reporter helpers
+          python scripts/collector.py --index "$INDEX" --out snapshot.json
 
-          # Save a timestamped JSON and also append to a Parquet file
+          # Store timestamped JSON
           mkdir -p data/intraday/$(date -u +'%Y-%m-%d')
           ts=$(date -u +'%Y-%m-%dT%H%M%SZ')
           cp snapshot.json data/intraday/$(date -u +'%Y-%m-%d')/${ts}.json
 
+          # Append to an intraday Parquet for analysis
           python - << 'PY'
-          import json, pandas as pd, pyarrow as pa, pyarrow.parquet as pq, datetime, pathlib
+          import json, pandas as pd, pyarrow as pa, pyarrow.parquet as pq, pathlib
           snap = json.load(open("snapshot.json"))
-          row = {
-              "timestamp_utc": datetime.datetime.utcnow().isoformat(timespec="seconds")+"Z",
-              "spot": snap.get("spot"),
-              "net_gex": snap.get("net_gex"),
-              "net_gex_norm": snap.get("net_gex_norm"),
-              "gamma_ratio": snap.get("gamma_ratio"),
-              "zero_gamma": snap.get("zero_gamma"),
-              "near_density": snap.get("near_density"),
-          }
-          df = pd.DataFrame([row])
+          df = pd.DataFrame([snap])
           out = pathlib.Path("data") / "intraday" / "gex_intraday.parquet"
           if out.exists():
               old = pq.read_table(out)
@@ -75,8 +89,8 @@ jobs:
               pq.write_table(pa.Table.from_pandas(df), out)
           PY
 
-      - name: Commit & push
-        if: steps.nyse.outcome == 'success'
+      - name: Commit & push data
+        if: steps.nyse.outputs.is_open == 'true'
         run: |
           git config user.name  "github-actions"
           git config user.email "github-actions@github.com"
