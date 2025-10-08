@@ -54,7 +54,7 @@ def build_0dte_df(options_df: pd.DataFrame, spot: float) -> pd.DataFrame:
     return merged
 
 
-def compute_gamma_ratio_and_near_density(df_0dte: pd.DataFrame, spot: float) -> tuple[float|None, float|None]:
+def compute_gamma_ratio_and_near_density(df_0dte: pd.DataFrame, spot: float):
     """
     GammaRatio (CallGamma$ / PutGamma$) and near-spot density (|CallGEX|+|PutGEX|
     within ±1% of spot), both in $ billions where relevant.
