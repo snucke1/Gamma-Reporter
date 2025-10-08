@@ -61,7 +61,7 @@ jobs:
             fh.write(f"is_open={'true' if is_open else 'false'}\n")
           PY
 
-      - name: Collect & append to Parquet + CSV (no JSON)
+      - name: Collect & append to Parquet + CSV (schema-safe)
         if: steps.nyse.outputs.is_open == 'true'
         env:
           INDEX: ${{ env.INDEX }}
@@ -87,8 +87,8 @@ jobs:
                   snap[k] = float('nan')
 
           # ---- 2) Make a 1-row DataFrame with fixed column order & dtypes ----
-          cols = ["timestamp_utc","index","spot","net_gex","gamma_ratio","zero_gamma","near_density"]
-          df = pd.DataFrame([[snap.get(c) for c in cols]], columns=cols).astype({
+          col_order = ["timestamp_utc","index","spot","net_gex","gamma_ratio","zero_gamma","near_density"]
+          dtype_map = {
               "timestamp_utc": "string",
               "index": "string",
               "spot": "float64",
@@ -96,7 +96,8 @@ jobs:
               "gamma_ratio": "float64",
               "zero_gamma": "float64",
               "near_density": "float64",
-          })
+          }
+          df_new = pd.DataFrame([[snap.get(c) for c in col_order]], columns=col_order).astype(dtype_map)
 
           # Explicit Arrow schema keeps Parquet consistent
           schema = pa.schema([
@@ -108,22 +109,54 @@ jobs:
               pa.field("zero_gamma",    pa.float64()),
               pa.field("near_density",  pa.float64()),
           ])
-          new_tbl = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
+          new_tbl = pa.Table.from_pandas(df_new, schema=schema, preserve_index=False)
 
           p_out = pathlib.Path("data") / "intraday" / "gex_intraday.parquet"
           p_out.parent.mkdir(parents=True, exist_ok=True)
 
+          def repair_existing_parquet_to_schema(path: pathlib.Path, target_schema: pa.Schema):
+              """
+              If an old Parquet file has 'null' types (or other mismatches),
+              repair it by round-tripping through pandas with the right dtypes,
+              then overwrite the file with the corrected schema.
+              """
+              old_tbl = pq.read_table(path)
+              df_old = old_tbl.to_pandas()
+
+              # Ensure required columns exist, fill missing columns with NA of correct dtype
+              for name, dtype in {
+                  "timestamp_utc": "string",
+                  "index": "string",
+                  "spot": "float64",
+                  "net_gex": "float64",
+                  "gamma_ratio": "float64",
+                  "zero_gamma": "float64",
+                  "near_density": "float64",
+              }.items():
+                  if name not in df_old.columns:
+                      df_old[name] = pd.Series([pd.NA]*len(df_old), dtype=dtype)
+
+              # Reorder & cast
+              df_old = df_old[col_order].astype(dtype_map)
+
+              repaired_tbl = pa.Table.from_pandas(df_old, schema=target_schema, preserve_index=False)
+              pq.write_table(repaired_tbl, path)
+
           if p_out.exists():
               old_tbl = pq.read_table(p_out)
               try:
-                  # Preferred: cast new row to the existing file's schema
+                  # Fast path: cast new row to existing schema and append
                   new_cast = new_tbl.cast(old_tbl.schema)
                   combined = pa.concat_tables([old_tbl, new_cast])
-              except pa.lib.ArrowInvalid:
-                  # If the old file has odd types, cast the old file to our schema, then append
-                  old_cast = old_tbl.cast(schema)
-                  combined = pa.concat_tables([old_cast, new_tbl])
-              pq.write_table(combined, p_out)
+                  pq.write_table(combined, p_out)
+              except (pa.lib.ArrowInvalid, pa.lib.ArrowNotImplementedError) as e:
+                  # Repair old file to target schema, then append
+                  print(f"[SchemaRepair] Detected schema issue: {e}. Repairing existing Parquet...")
+                  repair_existing_parquet_to_schema(p_out, schema)
+                  old_tbl2 = pq.read_table(p_out)
+                  new_cast2 = new_tbl.cast(old_tbl2.schema)  # now compatible
+                  combined2 = pa.concat_tables([old_tbl2, new_cast2])
+                  pq.write_table(combined2, p_out)
           else:
               pq.write_table(new_tbl, p_out)
 
@@ -131,13 +164,13 @@ jobs:
           c_out = pathlib.Path("data") / "intraday" / "gex_intraday.csv"
           if c_out.exists():
               old = pd.read_csv(c_out)
-              cat = pd.concat([old, df], ignore_index=True)
+              cat = pd.concat([old, df_new], ignore_index=True)
               cat = cat.drop_duplicates(subset=["timestamp_utc"], keep="last")
               cat.to_csv(c_out, index=False)
           else:
-              df.to_csv(c_out, index=False)
+              df_new.to_csv(c_out, index=False)
 
-          print("Appended 1 row to Parquet and CSV.")
+          print("Appended 1 row to Parquet and CSV (schema-safe).")
           PY
 
       - name: Commit & push data
@@ -146,6 +179,6 @@ jobs:
           git config user.name  "github-actions"
           git config user.email "github-actions@github.com"
           git add data/
-          git commit -m "GEX snapshot $(date -u +'%Y-%m-%d %H:%MZ') (Parquet+CSV only)" || echo "No changes"
+          git commit -m "GEX snapshot $(date -u +'%Y-%m-%d %H:%MZ') (schema-safe Parquet + CSV)" || echo "No changes"
           git pull --rebase origin ${{ github.ref_name }} || true
           git push
