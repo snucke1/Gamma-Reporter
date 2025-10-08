@@ -6,13 +6,13 @@ on:
     - cron: '30 13 * * 1-5'      # 13:30 UTC ~ US cash open (EDT)
     - cron: '0,30 14-20 * * 1-5' # 14:00–20:30 UTC
     - cron: '0,30 21 * * 1-5'    # 21:00 UTC (handles EST overlap)
-  workflow_dispatch:             # manual run if needed
+  workflow_dispatch:             # allow manual runs
 
 permissions:
-  contents: write                # allow commits from this workflow
+  contents: write                # allow this workflow to commit data to the repo
 
 env:
-  INDEX: SPX                     # change if you want another underlying
+  INDEX: SPX                     # change if you want a different underlying
 
 jobs:
   collect:
@@ -32,7 +32,7 @@ jobs:
           python -m pip install --upgrade pip
           # gamma_reporter imports these at module import time:
           pip install numpy pandas scipy matplotlib python-dateutil requests
-          # For calendar/Parquet and scheduling logic
+          # For calendar and Parquet/CSV handling:
           pip install pandas_market_calendars pyarrow
 
       - name: Compute market-open (NYSE) safely
@@ -44,7 +44,7 @@ jobs:
 
           now = datetime.datetime.now(datetime.timezone.utc)
           cal = mcal.get_calendar('XNYS')  # NYSE
-          # Use a small window so weekends/holidays don't raise
+          # Use a small window so weekends/holidays don't error out:
           start = (now - datetime.timedelta(days=1)).date()
           end   = (now + datetime.timedelta(days=1)).date()
           sched = cal.schedule(start_date=start, end_date=end)
@@ -61,56 +61,53 @@ jobs:
             fh.write(f"is_open={'true' if is_open else 'false'}\n")
           PY
 
-      - name: Collect & save snapshot
+      - name: Collect & append to Parquet + CSV (no JSON)
         if: steps.nyse.outputs.is_open == 'true'
         env:
           INDEX: ${{ env.INDEX }}
         run: |
-          mkdir -p scripts data/intraday
-          # Run the collector using your gamma_reporter helpers
-          python scripts/collector.py --index "$INDEX" --out snapshot.json
+          # Create destination folder once
+          mkdir -p data/intraday
 
-          # Store timestamped JSON
-          mkdir -p data/intraday/$(date -u +'%Y-%m-%d')
-          ts=$(date -u +'%Y-%m-%dT%H%M%SZ')
-          cp snapshot.json data/intraday/$(date -u +'%Y-%m-%d')/${ts}.json
-
-          # Append to an intraday Parquet for analysis
+          # Run Python inline: import your collector and write directly to Parquet & CSV
           python - << 'PY'
-          import json, pandas as pd, pyarrow as pa, pyarrow.parquet as pq, pathlib
-          snap = json.load(open("snapshot.json"))
-          df = pd.DataFrame([snap])
-          out = pathlib.Path("data") / "intraday" / "gex_intraday.parquet"
-          if out.exists():
-              old = pq.read_table(out)
-              new = pa.Table.from_pandas(df)
-              pq.write_table(pa.concat_tables([old, new]), out)
-          else:
-              pq.write_table(pa.Table.from_pandas(df), out)
-          PY
+          import os, sys, pathlib
+          import pandas as pd
+          import pyarrow as pa
+          import pyarrow.parquet as pq
 
-      - name: Append to CSV (Excel-friendly)
-        if: steps.nyse.outputs.is_open == 'true'
-        run: |
-          python - << 'PY'
-          import json, pandas as pd, pathlib
-          snap = json.load(open("snapshot.json"))
+          # Ensure we can import scripts/collector.py without __init__.py
+          sys.path.append('scripts')
+          import collector  # your scripts/collector.py
 
-          # column order for Excel
+          index = os.getenv('INDEX', 'SPX')
+          snap = collector.make_snapshot(index)  # dict with one row
+
+          # Build a 1-row DataFrame in a stable column order for Excel
           cols = ["timestamp_utc","index","spot","net_gex","gamma_ratio","zero_gamma","near_density"]
           df = pd.DataFrame([[snap.get(c) for c in cols]], columns=cols)
 
-          out = pathlib.Path("data") / "intraday" / "gex_intraday.csv"
-          out.parent.mkdir(parents=True, exist_ok=True)
-
-          if out.exists():
-              old = pd.read_csv(out)
-              cat = pd.concat([old, df], ignore_index=True)
-              # avoid duplicates if a retry occurs
-              cat = cat.drop_duplicates(subset=["timestamp_utc"], keep="last")
-              cat.to_csv(out, index=False)
+          # ----- Append to Parquet -----
+          p_out = pathlib.Path("data") / "intraday" / "gex_intraday.parquet"
+          if p_out.exists():
+              old = pq.read_table(p_out)
+              new = pa.Table.from_pandas(df)
+              pq.write_table(pa.concat_tables([old, new]), p_out)
           else:
-              df.to_csv(out, index=False)
+              pq.write_table(pa.Table.from_pandas(df), p_out)
+
+          # ----- Append to CSV (Excel-friendly) -----
+          c_out = pathlib.Path("data") / "intraday" / "gex_intraday.csv"
+          if c_out.exists():
+              old = pd.read_csv(c_out)
+              cat = pd.concat([old, df], ignore_index=True)
+              # avoid duplicate rows if a retry happens
+              cat = cat.drop_duplicates(subset=["timestamp_utc"], keep="last")
+              cat.to_csv(c_out, index=False)
+          else:
+              df.to_csv(c_out, index=False)
+
+          print("Appended 1 row to Parquet and CSV.")
           PY
 
       - name: Commit & push data
@@ -119,6 +116,6 @@ jobs:
           git config user.name  "github-actions"
           git config user.email "github-actions@github.com"
           git add data/
-          git commit -m "GEX snapshot $(date -u +'%Y-%m-%d %H:%MZ')" || echo "No changes"
+          git commit -m "GEX snapshot $(date -u +'%Y-%m-%d %H:%MZ') (Parquet+CSV only)" || echo "No changes"
           git pull --rebase origin ${{ github.ref_name }} || true
           git push
