@@ -12,7 +12,7 @@ permissions:
   contents: write                # allow commits from this workflow
 
 env:
-  INDEX: SPX                     # change to e.g. SPX, SPY, QQQ if desired
+  INDEX: SPX                     # change if you want another underlying
 
 jobs:
   collect:
@@ -87,6 +87,30 @@ jobs:
               pq.write_table(pa.concat_tables([old, new]), out)
           else:
               pq.write_table(pa.Table.from_pandas(df), out)
+          PY
+
+      - name: Append to CSV (Excel-friendly)
+        if: steps.nyse.outputs.is_open == 'true'
+        run: |
+          python - << 'PY'
+          import json, pandas as pd, pathlib
+          snap = json.load(open("snapshot.json"))
+
+          # column order for Excel
+          cols = ["timestamp_utc","index","spot","net_gex","gamma_ratio","zero_gamma","near_density"]
+          df = pd.DataFrame([[snap.get(c) for c in cols]], columns=cols)
+
+          out = pathlib.Path("data") / "intraday" / "gex_intraday.csv"
+          out.parent.mkdir(parents=True, exist_ok=True)
+
+          if out.exists():
+              old = pd.read_csv(out)
+              cat = pd.concat([old, df], ignore_index=True)
+              # avoid duplicates if a retry occurs
+              cat = cat.drop_duplicates(subset=["timestamp_utc"], keep="last")
+              cat.to_csv(out, index=False)
+          else:
+              df.to_csv(out, index=False)
           PY
 
       - name: Commit & push data
