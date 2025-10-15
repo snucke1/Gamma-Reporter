@@ -36,15 +36,16 @@ CONFIG = {
     'RISK_FREE_RATE': 0.05,
     'DIVIDEND_YIELD': 0.02,
     'GR_HIGH_THRESHOLD': 1.25,
-    'GR_LOW_THRESHOLD': 0.75
+    'GR_LOW_THRESHOLD': 0.75,
+    'GEX_MULTIPLIER': 0.5  # Keep the 0.5 factor, applied symmetrically
 }
 
 pd.options.display.float_format = '{:,.4f}'.format
 
 def calcGammaEx(S, K, vol, T, r, q, OI):
     """
-    Calculate Black-Scholes gamma exposure for options.
-    Note: Gamma is the same for calls and puts.
+    Calculate Black-Scholes gamma exposure (dollar gamma per 1% move) for options.
+    Note: Gamma is the same for calls and puts (positive), sign convention is applied later.
     """
     if T <= 0 or vol <= 0 or S <= 0 or K <= 0:
         return 0
@@ -52,39 +53,59 @@ def calcGammaEx(S, K, vol, T, r, q, OI):
     try:
         dp = (np.log(S / K) + (r - q + 0.5 * vol**2) * T) / (vol * np.sqrt(T))
         gamma = np.exp(-q * T) * norm.pdf(dp) / (S * vol * np.sqrt(T))
-        # Convert to dollar gamma per 1% move
-        return OI * CONFIG['CONTRACT_SIZE'] * S * S * CONFIG['PERCENT_MOVE'] * gamma
+        # Dollar gamma per 1% move for OI contracts
+        return OI * CONFIG['CONTRACT_SIZE'] * (S * S) * CONFIG['PERCENT_MOVE'] * gamma
     except (ValueError, ZeroDivisionError):
         return 0
 
 def parse_option_data(data_df):
     """Parse option data from raw dataframe"""
     data_df['CallPut'] = data_df['option'].str.slice(start=-9, stop=-8)
-    data_df['ExpirationDate'] = pd.to_datetime(data_df['option'].str.slice(start=-15, stop=-9), 
-                                               format='%y%m%d', errors='coerce')
+    data_df['ExpirationDate'] = pd.to_datetime(
+        data_df['option'].str.slice(start=-15, stop=-9), 
+        format='%y%m%d', errors='coerce'
+    )
     data_df = data_df.dropna(subset=['ExpirationDate'])
     
-    data_df['Strike'] = pd.to_numeric(data_df['option'].str.slice(start=-8, stop=-3), errors='coerce')
+    data_df['Strike'] = pd.to_numeric(
+        data_df['option'].str.slice(start=-8, stop=-3), errors='coerce'
+    )
     data_df = data_df.dropna(subset=['Strike'])
     
     return data_df
 
 def validate_and_clean_data(df, for_profile=False):
-    """Validate and clean option data"""
+    """Validate and clean option data; allow one-sided rows (call OR put)"""
     if for_profile:
         numeric_columns = ['CallIV', 'PutIV', 'CallOpenInt', 'PutOpenInt', 'StrikePrice']
     else:
         numeric_columns = ['CallIV', 'PutIV', 'CallGamma', 'PutGamma', 'CallOpenInt', 'PutOpenInt', 'StrikePrice']
-    
+
+    # Ensure numeric
     for col in numeric_columns:
         df[col] = pd.to_numeric(df[col], errors='coerce')
-    
-    df = df.dropna(subset=numeric_columns)
+
+    # Drop obviously bad rows
+    if 'ExpirationDate' in df.columns:
+        df = df.dropna(subset=['ExpirationDate'])
+    df = df.dropna(subset=['StrikePrice'])
     df = df[df['StrikePrice'] > 0]
-    df = df[(df['CallIV'] > 0) & (df['PutIV'] > 0)]
-    df = df[(df['CallOpenInt'] >= 0) & (df['PutOpenInt'] >= 0)]
-    df = df[(df['CallIV'] < 5) & (df['PutIV'] < 5)]  # Remove IVs > 500%
-    
+
+    # Clip OI to be non-negative
+    if 'CallOpenInt' in df.columns:
+        df['CallOpenInt'] = df['CallOpenInt'].clip(lower=0)
+    if 'PutOpenInt' in df.columns:
+        df['PutOpenInt'] = df['PutOpenInt'].clip(lower=0)
+
+    # IV sanity: keep if each side is >= 0 and < 500%
+    df = df[(df['CallIV'] >= 0) & (df['PutIV'] >= 0)]
+    df = df[(df['CallIV'] < 5) & (df['PutIV'] < 5)]
+
+    # Keep a row if at least one side has both IV>0 and OI>0
+    mask_valid_call = (df['CallIV'] > 0) & (df['CallOpenInt'] > 0)
+    mask_valid_put  = (df['PutIV']  > 0) & (df['PutOpenInt']  > 0)
+    df = df[mask_valid_call | mask_valid_put]
+
     return df
 
 def fetch_options_data(index):
@@ -137,8 +158,8 @@ def calculate_gamma_profile(df, from_strike, to_strike):
             axis=1
         )
         
-        # Puts have negative gamma exposure from dealers' perspective (short puts)
-        total = (call_gamma.sum() - put_gamma.sum()) / CONFIG['BILLION']
+        # Apply same 0.5 multiplier symmetrically; puts negative by convention
+        total = (CONFIG['GEX_MULTIPLIER'] * call_gamma.sum() - CONFIG['GEX_MULTIPLIER'] * put_gamma.sum()) / CONFIG['BILLION']
         total_gamma.append(total)
     
     return levels, total_gamma
@@ -161,9 +182,11 @@ def find_gamma_flip_points(levels, total_gamma):
 
 def process_gamma(df, spot_price):
     """Process gamma for bar chart plotting"""
-    df['CallGEX'] = df['CallGamma'] * df['CallOpenInt'] * CONFIG['CONTRACT_SIZE'] * spot_price * spot_price * CONFIG['PERCENT_MOVE'] * 0.5
-    df['PutGEX'] = df['PutGamma'] * df['PutOpenInt'] * CONFIG['CONTRACT_SIZE'] * spot_price * spot_price * CONFIG['PERCENT_MOVE'] * -1 * 0.5
-    df['TotalGamma'] = (df['CallGEX'] + df['PutGEX']) / CONFIG['BILLION']
+    scale = CONFIG['CONTRACT_SIZE'] * (spot_price ** 2) * CONFIG['PERCENT_MOVE'] * CONFIG['GEX_MULTIPLIER']
+    df['CallGEX'] = df['CallGamma'] * df['CallOpenInt'] * scale
+    df['PutGEX'] = -df['PutGamma'] * df['PutOpenInt'] * scale  # puts negative by convention
+    df['NetGEX'] = df['CallGEX'] + df['PutGEX']
+    df['TotalGamma'] = df['NetGEX'] / CONFIG['BILLION']  # $B for plotting
     return df
 
 def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix, ax1, ax2, bin_width=None, add_guidance_box=False, show_50_ticks=False):
@@ -197,6 +220,13 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
     total_put_oi = df_agg['PutOpenInt'].sum()
     put_call_ratio = total_put_oi / total_call_oi if total_call_oi != 0 else np.nan
 
+    # Reconciliation check: Net should equal components
+    net_from_components = (df_agg['CallGEX'] + df_agg['PutGEX']) / CONFIG['BILLION']
+    if 'TotalGamma' in df_agg.columns:
+        mismatch = np.max(np.abs(df_agg['TotalGamma'].values - net_from_components.values))
+        if mismatch > 1e-6:
+            logging.warning(f"Net gamma mismatch across bins: max diff = {mismatch:.6f} B")
+
     # Net Gamma
     ax1.grid(True, alpha=0.3)
     ax1.bar(strikes, df_agg['TotalGamma'].values, width=bar_width, linewidth=1.5 if bin_width else 0.5,
@@ -209,7 +239,7 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
         tick_end = int(((to_strike // 50) + 1) * 50)
         ax1.set_xticks(np.arange(tick_start, tick_end, 50))
     
-    ax1.set_title(f"{title_prefix} Total Gamma: ${df['TotalGamma'].sum():.2f} Bn per 1% {index} Move",
+    ax1.set_title(f"{title_prefix} Net Gamma: ${df['TotalGamma'].sum():.2f} Bn per 1% {index} Move",
                   fontweight="bold", fontsize=14)
     ax1.set_xlabel('Strike Price', fontweight="bold")
     ax1.set_ylabel('Spot Gamma Exposure ($B/1% move)', fontweight="bold")
@@ -266,7 +296,7 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
                  bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.4),
                  verticalalignment='top')
 
-    # By Type
+    # By Type + Net overlay
     ax2.grid(True, alpha=0.3)
     ax2.bar(strikes, df_agg['CallGEX'].values / CONFIG['BILLION'],
             width=bar_width, linewidth=1.5 if bin_width else 0.5, edgecolor='k',
@@ -274,6 +304,10 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
     ax2.bar(strikes, df_agg['PutGEX'].values / CONFIG['BILLION'],
             width=bar_width, linewidth=1.5 if bin_width else 0.5, edgecolor='k',
             color='red', alpha=0.7, label="Put Gamma")
+    # Net line overlay so it visually reconciles with top panel
+    net_by_strike_B = (df_agg['CallGEX'] + df_agg['PutGEX']) / CONFIG['BILLION']
+    ax2.plot(strikes, net_by_strike_B.values, color='black', linewidth=1.0, label='Net (line)')
+
     ax2.set_xlim([from_strike, to_strike])
     ax2.set_title(f"{title_prefix} Gamma Exposure by Option Type", fontweight="bold", fontsize=14)
     ax2.set_xlabel('Strike Price', fontweight="bold")
@@ -415,9 +449,27 @@ def main():
     calls_0dte = calls_0dte[['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
     puts_0dte = puts_0dte[['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
     
-    df_0dte = calls_0dte.merge(puts_0dte, on=['ExpirationDate', 'Strike'], suffixes=('_call', '_put'))
-    df_0dte.columns = ['ExpirationDate', 'StrikePrice', 'CallIV', 'CallGamma', 'CallOpenInt',
-                       'PutIV', 'PutGamma', 'PutOpenInt']
+    df_0dte = calls_0dte.merge(
+        puts_0dte,
+        on=['ExpirationDate', 'Strike'],
+        how='outer',
+        suffixes=('_call', '_put')
+    )
+
+    # Fill missing side with zeros so a valid side still contributes
+    for col in ['iv_call','gamma_call','open_interest_call','iv_put','gamma_put','open_interest_put']:
+        if col not in df_0dte.columns:
+            df_0dte[col] = 0
+    df_0dte = df_0dte.fillna({
+        'iv_call': 0, 'gamma_call': 0, 'open_interest_call': 0,
+        'iv_put':  0, 'gamma_put':  0, 'open_interest_put':  0,
+    })
+
+    df_0dte = df_0dte.rename(columns={
+        'Strike':'StrikePrice',
+        'iv_call':'CallIV', 'gamma_call':'CallGamma', 'open_interest_call':'CallOpenInt',
+        'iv_put':'PutIV',   'gamma_put':'PutGamma',   'open_interest_put':'PutOpenInt'
+    })
     df_0dte['ExpirationDate'] = df_0dte['ExpirationDate'] + timedelta(hours=16)
     df_0dte = validate_and_clean_data(df_0dte)
     
@@ -448,9 +500,26 @@ def main():
     calls_6m = calls_6m[['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
     puts_6m = puts_6m[['ExpirationDate', 'Strike', 'iv', 'gamma', 'open_interest']]
     
-    df_6m = calls_6m.merge(puts_6m, on=['ExpirationDate', 'Strike'], suffixes=('_call', '_put'))
-    df_6m.columns = ['ExpirationDate', 'StrikePrice', 'CallIV', 'CallGamma', 'CallOpenInt',
-                     'PutIV', 'PutGamma', 'PutOpenInt']
+    df_6m = calls_6m.merge(
+        puts_6m,
+        on=['ExpirationDate', 'Strike'],
+        how='outer',
+        suffixes=('_call', '_put')
+    )
+
+    for col in ['iv_call','gamma_call','open_interest_call','iv_put','gamma_put','open_interest_put']:
+        if col not in df_6m.columns:
+            df_6m[col] = 0
+    df_6m = df_6m.fillna({
+        'iv_call': 0, 'gamma_call': 0, 'open_interest_call': 0,
+        'iv_put':  0, 'gamma_put':  0, 'open_interest_put':  0,
+    })
+
+    df_6m = df_6m.rename(columns={
+        'Strike':'StrikePrice',
+        'iv_call':'CallIV', 'gamma_call':'CallGamma', 'open_interest_call':'CallOpenInt',
+        'iv_put':'PutIV',   'gamma_put':'PutGamma',   'open_interest_put':'PutOpenInt'
+    })
     df_6m['ExpirationDate'] = df_6m['ExpirationDate'] + timedelta(hours=16)
     df_6m = validate_and_clean_data(df_6m)
     
@@ -505,8 +574,26 @@ def main():
         calls_profile = data_profile[data_profile['CallPut'] == "C"][['ExpirationDate', 'Strike', 'iv', 'open_interest']]
         puts_profile = data_profile[data_profile['CallPut'] == "P"][['ExpirationDate', 'Strike', 'iv', 'open_interest']]
         
-        df_profile = calls_profile.merge(puts_profile, on=['ExpirationDate', 'Strike'], suffixes=('_call', '_put'))
-        df_profile.columns = ['ExpirationDate', 'StrikePrice', 'CallIV', 'CallOpenInt', 'PutIV', 'PutOpenInt']
+        df_profile = calls_profile.merge(
+            puts_profile,
+            on=['ExpirationDate', 'Strike'],
+            how='outer',
+            suffixes=('_call', '_put')
+        )
+
+        for col in ['iv_call','open_interest_call','iv_put','open_interest_put']:
+            if col not in df_profile.columns:
+                df_profile[col] = 0
+        df_profile = df_profile.fillna({
+            'iv_call': 0, 'open_interest_call': 0,
+            'iv_put':  0, 'open_interest_put':  0,
+        })
+
+        df_profile = df_profile.rename(columns={
+            'Strike':'StrikePrice',
+            'iv_call':'CallIV', 'open_interest_call':'CallOpenInt',
+            'iv_put':'PutIV',   'open_interest_put':'PutOpenInt'
+        })
         
         # Add time component for accurate day count
         df_profile['ExpirationDate'] = df_profile['ExpirationDate'] + timedelta(hours=16)
