@@ -227,13 +227,13 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
         if mismatch > 1e-6:
             logging.warning(f"Net gamma mismatch across bins: max diff = {mismatch:.6f} B")
 
-    # Net Gamma
+    # Net Gamma (top)
     ax1.grid(True, alpha=0.3)
     ax1.bar(strikes, df_agg['TotalGamma'].values, width=bar_width, linewidth=1.5 if bin_width else 0.5,
             edgecolor='k', color='steelblue', alpha=0.7, label="Net Gamma")
     ax1.set_xlim([from_strike, to_strike])
     
-    # Set x-axis ticks every 50 points for 0-1DTE only
+    # Set x-axis ticks every 50 points for 0-1DTE
     if show_50_ticks:
         tick_start = int((from_strike // 50) * 50)
         tick_end = int(((to_strike // 50) + 1) * 50)
@@ -247,7 +247,7 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
                 label=f"{index} Spot: ${spot_price:,.0f}")
     ax1.legend()
 
-    # Add guidance text box based on Gamma Ratio
+    # Guidance box if wanted (only used on 6M in main)
     if add_guidance_box and not np.isnan(gamma_ratio):
         high_gr_text = (
             f"GR > {CONFIG['GR_HIGH_THRESHOLD']} (Currently: {gamma_ratio:.2f}) - High Positive Gamma\n"
@@ -296,7 +296,7 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
                  bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.4),
                  verticalalignment='top')
 
-    # By Type + Net overlay
+    # By Type + Net overlay (bottom)
     ax2.grid(True, alpha=0.3)
     ax2.bar(strikes, df_agg['CallGEX'].values / CONFIG['BILLION'],
             width=bar_width, linewidth=1.5 if bin_width else 0.5, edgecolor='k',
@@ -309,6 +309,12 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
     ax2.plot(strikes, net_by_strike_B.values, color='black', linewidth=1.0, label='Net (line)')
 
     ax2.set_xlim([from_strike, to_strike])
+    # Set x-axis ticks every 50 points for 0-1DTE (bottom panel too)
+    if show_50_ticks:
+        tick_start = int((from_strike // 50) * 50)
+        tick_end = int(((to_strike // 50) + 1) * 50)
+        ax2.set_xticks(np.arange(tick_start, tick_end, 50))
+
     ax2.set_title(f"{title_prefix} Gamma Exposure by Option Type", fontweight="bold", fontsize=14)
     ax2.set_xlabel('Strike Price', fontweight="bold")
     ax2.set_ylabel('Spot Gamma Exposure ($B/1% move)', fontweight="bold")
