@@ -26,8 +26,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 CONFIG = {
     'STRIKE_RANGE_WIDTH': 500,  # For 0DTE
     'OTM_FILTER_PERCENT': 0.02,  # For 0DTE
-    'STRIKE_RANGE_LOWER': 0.8,   # For 6M
-    'STRIKE_RANGE_UPPER': 1.2,   # For 6M
+    'STRIKE_RANGE_LOWER': 0.8,   # For 6M and profile
+    'STRIKE_RANGE_UPPER': 1.2,   # For 6M and profile
     'CONTRACT_SIZE': 100,
     'PERCENT_MOVE': 0.01,
     'MONTHS_TO_INCLUDE': 6,
@@ -41,6 +41,22 @@ CONFIG = {
 }
 
 pd.options.display.float_format = '{:,.4f}'.format
+
+def calcGammaEx(S, K, vol, T, r, q, OI):
+    """
+    Calculate Black-Scholes gamma exposure (dollar gamma per 1% move) for options.
+    Note: Gamma is the same for calls and puts (positive), sign convention is applied later.
+    """
+    if T <= 0 or vol <= 0 or S <= 0 or K <= 0:
+        return 0
+    
+    try:
+        dp = (np.log(S / K) + (r - q + 0.5 * vol**2) * T) / (vol * np.sqrt(T))
+        gamma = np.exp(-q * T) * norm.pdf(dp) / (S * vol * np.sqrt(T))
+        # Dollar gamma per 1% move for OI contracts
+        return OI * CONFIG['CONTRACT_SIZE'] * (S * S) * CONFIG['PERCENT_MOVE'] * gamma
+    except (ValueError, ZeroDivisionError):
+        return 0
 
 def parse_option_data(data_df):
     """Parse option data from raw dataframe"""
@@ -114,6 +130,55 @@ def fetch_options_data(index):
     except ValueError as e:
         logging.error(f"Data format error: {e}")
         sys.exit(1)
+
+def calculate_gamma_profile(df, from_strike, to_strike):
+    """Calculate gamma exposure profile across different spot levels"""
+    levels = np.linspace(from_strike, to_strike, 100)
+    
+    today_date = date.today()
+    df['daysTillExp'] = df['ExpirationDate'].apply(
+        lambda x: max(1 / CONFIG['TRADING_DAYS_PER_YEAR'], 
+                     np.busday_count(today_date, x.date()) / CONFIG['TRADING_DAYS_PER_YEAR'])
+    )
+    
+    total_gamma = []
+    
+    for level in levels:
+        call_gamma = df.apply(
+            lambda row: calcGammaEx(level, row['StrikePrice'], row['CallIV'], 
+                                  row['daysTillExp'], CONFIG['RISK_FREE_RATE'], 
+                                  CONFIG['DIVIDEND_YIELD'], row['CallOpenInt']), 
+            axis=1
+        )
+        
+        put_gamma = df.apply(
+            lambda row: calcGammaEx(level, row['StrikePrice'], row['PutIV'], 
+                                  row['daysTillExp'], CONFIG['RISK_FREE_RATE'], 
+                                  CONFIG['DIVIDEND_YIELD'], row['PutOpenInt']), 
+            axis=1
+        )
+        
+        # Apply same 0.5 multiplier symmetrically; puts negative by convention
+        total = (CONFIG['GEX_MULTIPLIER'] * call_gamma.sum() - CONFIG['GEX_MULTIPLIER'] * put_gamma.sum()) / CONFIG['BILLION']
+        total_gamma.append(total)
+    
+    return levels, total_gamma
+
+def find_gamma_flip_points(levels, total_gamma):
+    """Find points where gamma crosses zero using linear interpolation"""
+    flip_points = []
+    zero_crossings = np.where(np.diff(np.sign(total_gamma)))[0]
+    
+    for idx in zero_crossings:
+        if idx < len(levels) - 1:
+            x1, x2 = levels[idx], levels[idx + 1]
+            y1, y2 = total_gamma[idx], total_gamma[idx + 1]
+            
+            if y2 != y1:
+                zero_point = x1 - y1 * (x2 - x1) / (y2 - y1)
+                flip_points.append(zero_point)
+    
+    return flip_points
 
 def process_gamma(df, spot_price):
     """Process gamma for bar chart plotting"""
@@ -266,6 +331,39 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
              verticalalignment='top')
     ax2.legend()
 
+def plot_gamma_profile(levels, total_gamma, spot_price, index, flip_points):
+    """Create gamma profile plot"""
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.grid(True, alpha=0.3)
+    
+    # Plot gamma profile
+    ax.plot(levels, total_gamma, 'b-', linewidth=2, label="Total Gamma (0 & 1 DTE)")
+    
+    today_str = date.today().strftime('%d %b %Y')
+    ax.set_title(f"Gamma Profile (0-DTE & 1-DTE) - {index} - {today_str}", fontweight="bold", fontsize=16)
+    ax.set_xlabel('Index Price', fontweight="bold")
+    ax.set_ylabel('Gamma Exposure ($ billions / 1% move)', fontweight="bold")
+    
+    # Add zero and spot price lines
+    ax.axhline(y=0, color='black', lw=1)
+    ax.axvline(x=spot_price, color='red', lw=2, linestyle='--', label=f"{index} Spot: ${spot_price:,.0f}")
+    
+    # Mark gamma flip points
+    for i, flip in enumerate(flip_points):
+        if levels[0] <= flip <= levels[-1]:
+            ax.axvline(x=flip, color='green', lw=1.5, linestyle=':', 
+                       label=f"Gamma Flip: ${flip:,.0f}" if i == 0 else "")
+    
+    # Add shading for negative/positive gamma regions
+    ax.fill_between(levels, total_gamma, 0, where=np.array(total_gamma) > 0, facecolor='green', alpha=0.1)
+    ax.fill_between(levels, total_gamma, 0, where=np.array(total_gamma) < 0, facecolor='red', alpha=0.1)
+    
+    ax.set_xlim([levels[0], levels[-1]])
+    ax.legend(loc='best')
+    
+    plt.tight_layout()
+    return fig
+
 def send_email_with_charts(chart_paths, index, spot_price):
     """Send email with multiple chart attachments"""
     sender_email = os.environ.get('SENDER_EMAIL')
@@ -282,12 +380,13 @@ def send_email_with_charts(chart_paths, index, spot_price):
     msg['From'] = sender_email
     msg['To'] = receiver_email
 
-    body = f"""Attached is the gamma exposure bar chart for {index}.
+    body = f"""Attached are the gamma exposure charts for {index}.
 
 Current Spot Price: ${spot_price:,.2f}
 
-Chart included:
-- Gamma Exposure Bar Charts (0-1DTE and 6M)
+Charts included:
+1. Gamma Exposure Bar Charts (0-1DTE and 6M)
+2. Gamma Profile (0-DTE & 1-DTE)
 """
     msg.attach(MIMEText(body, 'plain'))
 
@@ -330,7 +429,7 @@ def main():
     today_date = date.today()
     tomorrow_date = today_date + timedelta(days=1)
     
-    # ===== Gamma Exposure Bar Charts (0-1DTE and 6M) =====
+    # ===== FIRST PLOT: Gamma Exposure Bar Charts (0-1DTE and 6M) =====
     
     # --- 0-1DTE Processing ---
     half_range = CONFIG['STRIKE_RANGE_WIDTH'] / 2
@@ -436,9 +535,9 @@ def main():
     else:
         logging.warning("No valid 6M options data after cleaning")
     
-    # Create plot for bar charts
-    fig, axs = plt.subplots(2, 2, figsize=(20, 14))
-    fig.suptitle(f'Gamma Exposure Analysis - {index}', fontsize=16, fontweight='bold')
+    # Create first plot for bar charts
+    fig1, axs = plt.subplots(2, 2, figsize=(20, 14))
+    fig1.suptitle(f'Gamma Exposure Analysis - {index}', fontsize=16, fontweight='bold')
     
     # Plot 0-1DTE (left column) - WITH 50-tick intervals
     if len(df_0dte) > 0:
@@ -459,15 +558,91 @@ def main():
     plt.tight_layout()
     
     # Save bar chart
-    chart_filename = f"gamma_bars_{index}_{date.today()}.png"
-    fig.savefig(chart_filename)
-    logging.info(f"Bar chart saved as {chart_filename}")
+    chart1_filename = f"gamma_bars_{index}_{date.today()}.png"
+    fig1.savefig(chart1_filename)
+    logging.info(f"Bar chart saved as {chart1_filename}")
     
-    # Close plot to free memory
+    # ===== SECOND PLOT: Gamma Profile =====
+    
+    # Get 0-DTE and 1-DTE for profile
+    unique_expiries = sorted(data_df['ExpirationDate'].unique())
+    chart2_filename = None
+    
+    if len(unique_expiries) >= 2:
+        target_expiries = unique_expiries[:2]  # Get first two expiration dates
+        dte_0_str = pd.to_datetime(target_expiries[0]).strftime('%Y-%m-%d')
+        dte_1_str = pd.to_datetime(target_expiries[1]).strftime('%Y-%m-%d')
+        logging.info(f"Creating profile for 0-DTE ({dte_0_str}) and 1-DTE ({dte_1_str}) expirations.")
+        
+        data_profile = data_df[data_df['ExpirationDate'].isin(target_expiries)]
+        
+        # Separate calls and puts for profile
+        calls_profile = data_profile[data_profile['CallPut'] == "C"][['ExpirationDate', 'Strike', 'iv', 'open_interest']]
+        puts_profile = data_profile[data_profile['CallPut'] == "P"][['ExpirationDate', 'Strike', 'iv', 'open_interest']]
+        
+        df_profile = calls_profile.merge(
+            puts_profile,
+            on=['ExpirationDate', 'Strike'],
+            how='outer',
+            suffixes=('_call', '_put')
+        )
+
+        for col in ['iv_call','open_interest_call','iv_put','open_interest_put']:
+            if col not in df_profile.columns:
+                df_profile[col] = 0
+        df_profile = df_profile.fillna({
+            'iv_call': 0, 'open_interest_call': 0,
+            'iv_put':  0, 'open_interest_put':  0,
+        })
+
+        df_profile = df_profile.rename(columns={
+            'Strike':'StrikePrice',
+            'iv_call':'CallIV', 'open_interest_call':'CallOpenInt',
+            'iv_put':'PutIV',   'open_interest_put':'PutOpenInt'
+        })
+        
+        # Add time component for accurate day count
+        df_profile['ExpirationDate'] = df_profile['ExpirationDate'] + timedelta(hours=16)
+        
+        df_profile = validate_and_clean_data(df_profile, for_profile=True)
+        logging.info(f"Valid options for profile after cleaning: {len(df_profile)}")
+        
+        if not df_profile.empty:
+            # Calculate profile
+            from_strike_profile = CONFIG['STRIKE_RANGE_LOWER'] * spot_price
+            to_strike_profile = CONFIG['STRIKE_RANGE_UPPER'] * spot_price
+            
+            levels, total_gamma = calculate_gamma_profile(df_profile, from_strike_profile, to_strike_profile)
+            flip_points = find_gamma_flip_points(levels, total_gamma)
+            
+            # Create profile plot
+            fig2 = plot_gamma_profile(levels, total_gamma, spot_price, index, flip_points)
+            
+            # Save profile chart
+            chart2_filename = f"gamma_profile_{index}_{date.today()}.png"
+            fig2.savefig(chart2_filename)
+            logging.info(f"Profile chart saved as {chart2_filename}")
+            
+            # Print summary statistics
+            spot_gamma_val = np.interp(spot_price, levels, total_gamma)
+            logging.info("\n=== GAMMA PROFILE SUMMARY (0 & 1 DTE) ===")
+            logging.info(f"Gamma at Spot ({spot_price:,.0f}): ${spot_gamma_val:.2f}B per 1% move")
+            if flip_points:
+                logging.info(f"Primary Gamma Flip Point: ${flip_points[0]:,.0f}")
+        else:
+            logging.error("No valid options data found for profile.")
+    else:
+        logging.error("Not enough expiration dates available for profile analysis.")
+    
+    # Close all plots to free memory
     plt.close('all')
     
-    # Send email with bar chart only
-    send_email_with_charts([chart_filename], index, spot_price)
+    # Send email with both charts
+    charts_to_send = [chart1_filename]
+    if chart2_filename:
+        charts_to_send.append(chart2_filename)
+    
+    send_email_with_charts(charts_to_send, index, spot_price)
 
 if __name__ == "__main__":
     main()
