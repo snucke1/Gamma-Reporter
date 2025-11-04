@@ -206,7 +206,7 @@ def plot_gamma_bars(df, spot_price, from_strike, to_strike, index, title_prefix,
             "   Consider opposite trades.\n"
         )
         neutral_gr_text = (
-            f"{CONFIG['GR_LOW_THRESHOLD']} ≤ GR ≤ {CONFIG['GR_HIGH_THRESHOLD']} (Currently: {gamma_ratio:.2f}) - Balanced Gamma\n"
+            f"{CONFIG['GR_LOW_THRESHOLD']} > GR ≤ {CONFIG['GR_HIGH_THRESHOLD']} (Currently: {gamma_ratio:.2f}) - Balanced Gamma\n"
             "-----------------------------------------------------------\n"
             "Expect: Choppy or range-bound market. No strong directional\n"
             "pressure from dealer hedging.\n"
