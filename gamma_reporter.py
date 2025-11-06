@@ -386,20 +386,20 @@ def main():
     else:
         logging.warning("No valid 0-1DTE options data after cleaning")
     
-    # --- 6 Months Processing (excluding today) ---
+    # --- 6 Months Processing (excluding today AND tomorrow) ---
     six_months_later = today_date + relativedelta(months=CONFIG['MONTHS_TO_INCLUDE'])
     from_strike_6m = CONFIG['STRIKE_RANGE_LOWER'] * spot_price
     to_strike_6m = CONFIG['STRIKE_RANGE_UPPER'] * spot_price
     
-    # Exclude today's expiring options, start from tomorrow
-    data_6m = data_df[(data_df['ExpirationDate'].dt.date > today_date) & 
+    # Exclude both today's AND tomorrow's expiring options
+    data_6m = data_df[(data_df['ExpirationDate'].dt.date > tomorrow_date) & 
                       (data_df['ExpirationDate'].dt.date <= six_months_later)]
     
     # Log the date range for 6M options
     if len(data_6m) > 0:
         earliest_expiry = data_6m['ExpirationDate'].dt.date.min()
         latest_expiry = data_6m['ExpirationDate'].dt.date.max()
-        logging.info(f"6M options date range: {earliest_expiry} to {latest_expiry} (excluding today)")
+        logging.info(f"6M options date range: {earliest_expiry} to {latest_expiry} (excluding today and tomorrow)")
     
     calls_6m = data_6m[data_6m['CallPut'] == "C"].reset_index(drop=True)
     puts_6m = data_6m[data_6m['CallPut'] == "P"].reset_index(drop=True)
@@ -450,7 +450,7 @@ def main():
     
     # Plot 6M (right column) - WITHOUT 50-tick intervals (default behavior)
     if len(df_6m) > 0:
-        plot_gamma_bars(df_6m, spot_price, from_strike_6m, to_strike_6m, index, "6M (excl. today)", 
+        plot_gamma_bars(df_6m, spot_price, from_strike_6m, to_strike_6m, index, "6M (excl. 0-1DTE)", 
                        axs[0,1], axs[1,1], bin_width=20, add_guidance_box=True, show_50_ticks=False)
     else:
         axs[0,1].set_title("No valid 6M data")
